@@ -21,32 +21,16 @@ class Trainer:
     ):
 
         self.model = model
-
-        self.train_loader = (
-            train_loader
-        )
-
-        self.val_loader = (
-            val_loader
-        )
-
-        self.optimizer = (
-            optimizer
-        )
-
-        self.scheduler = (
-            scheduler
-        )
-
-        self.criterion = (
-            criterion
-        )
-
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.criterion = criterion
         self.config = config
 
-        # ------------------------------------------------
-        # Device
-        # ------------------------------------------------
+        # ====================================================
+        # DEVICE
+        # ====================================================
 
         device_name = (
             config["training"]
@@ -75,9 +59,9 @@ class Trainer:
             self.device
         )
 
-        # ------------------------------------------------
+        # ====================================================
         # AMP
-        # ------------------------------------------------
+        # ====================================================
 
         self.use_amp = (
             config["training"]
@@ -88,16 +72,14 @@ class Trainer:
             and self.device.type == "cuda"
         )
 
-        self.scaler = (
-            torch.amp.GradScaler(
-                "cuda",
-                enabled=self.use_amp
-            )
+        self.scaler = torch.amp.GradScaler(
+            "cuda",
+            enabled=self.use_amp
         )
 
-        # ------------------------------------------------
-        # Gradient clipping
-        # ------------------------------------------------
+        # ====================================================
+        # GRADIENT CLIPPING
+        # ====================================================
 
         self.gradient_clip = (
             config["training"]
@@ -107,17 +89,15 @@ class Trainer:
             )
         )
 
-        # ------------------------------------------------
-        # History
-        # ------------------------------------------------
+        # ====================================================
+        # TRAINING HISTORY
+        # ====================================================
 
-        self.history = (
-            TrainingHistory()
-        )
+        self.history = TrainingHistory()
 
-        # ------------------------------------------------
-        # Checkpoint manager
-        # ------------------------------------------------
+        # ====================================================
+        # CHECKPOINT MANAGER
+        # ====================================================
 
         checkpoint_dir = (
             config["checkpoint"]
@@ -133,13 +113,16 @@ class Trainer:
             )
         )
 
-        self.best_metric = float(
-            "-inf"
-        )
+        # ====================================================
+        # BEST VALIDATION LOSS
+        # ====================================================
 
-    # ====================================================
+        # Validation loss is minimized.
+        self.best_metric = float("inf")
+
+    # ========================================================
     # TRAIN ONE EPOCH
-    # ====================================================
+    # ========================================================
 
     def train_one_epoch(
         self,
@@ -148,11 +131,25 @@ class Trainer:
 
         self.model.train()
 
+        # ----------------------------------------------------
+        # Running losses
+        # ----------------------------------------------------
+
         running_loss = 0.0
+
+        running_box_loss = 0.0
+
+        running_cls_loss = 0.0
+
+        running_dfl_loss = 0.0
 
         num_batches = len(
             self.train_loader
         )
+
+        # ----------------------------------------------------
+        # Batch loop
+        # ----------------------------------------------------
 
         for batch_idx, batch in enumerate(
             self.train_loader
@@ -165,12 +162,16 @@ class Trainer:
                 non_blocking=True
             )
 
+            # ------------------------------------------------
+            # Clear gradients
+            # ------------------------------------------------
+
             self.optimizer.zero_grad(
                 set_to_none=True
             )
 
             # ------------------------------------------------
-            # Forward + loss
+            # Forward + Loss
             # ------------------------------------------------
 
             with torch.autocast(
@@ -182,13 +183,26 @@ class Trainer:
                     images
                 )
 
-                loss = self.criterion(
+                # YOLOLoss returns dictionary
+                #
+                # {
+                #     "total": ...,
+                #     "box": ...,
+                #     "cls": ...,
+                #     "dfl": ...,
+                #     "num_foreground": ...
+                # }
+
+                loss_dict = self.criterion(
                     outputs,
                     targets
                 )
 
+                # Actual loss used for backward
+                loss = loss_dict["total"]
+
             # ------------------------------------------------
-            # Backward
+            # BACKWARD
             # ------------------------------------------------
 
             if self.use_amp:
@@ -196,6 +210,10 @@ class Trainer:
                 self.scaler.scale(
                     loss
                 ).backward()
+
+                # --------------------------------------------
+                # Gradient clipping
+                # --------------------------------------------
 
                 if (
                     self.gradient_clip
@@ -211,6 +229,10 @@ class Trainer:
                         self.gradient_clip
                     )
 
+                # --------------------------------------------
+                # Optimizer step
+                # --------------------------------------------
+
                 self.scaler.step(
                     self.optimizer
                 )
@@ -220,6 +242,10 @@ class Trainer:
             else:
 
                 loss.backward()
+
+                # --------------------------------------------
+                # Gradient clipping
+                # --------------------------------------------
 
                 if (
                     self.gradient_clip
@@ -231,15 +257,35 @@ class Trainer:
                         self.gradient_clip
                     )
 
+                # --------------------------------------------
+                # Optimizer step
+                # --------------------------------------------
+
                 self.optimizer.step()
+
+            # =================================================
+            # ACCUMULATE LOSSES
+            # =================================================
 
             running_loss += (
                 loss.item()
             )
 
-            # ------------------------------------------------
-            # Logging
-            # ------------------------------------------------
+            running_box_loss += (
+                loss_dict["box"].item()
+            )
+
+            running_cls_loss += (
+                loss_dict["cls"].item()
+            )
+
+            running_dfl_loss += (
+                loss_dict["dfl"].item()
+            )
+
+            # =================================================
+            # BATCH LOGGING
+            # =================================================
 
             print_frequency = (
                 self.config["logging"]
@@ -255,36 +301,94 @@ class Trainer:
             ):
 
                 print(
-                    f"Epoch "
-                    f"{epoch} | "
+                    f"Epoch {epoch} | "
                     f"Batch "
                     f"{batch_idx + 1}/"
                     f"{num_batches} | "
-                    f"Loss: "
-                    f"{loss.item():.4f}"
+                    f"Total: "
+                    f"{loss.item():.4f} | "
+                    f"Box: "
+                    f"{loss_dict['box'].item():.4f} | "
+                    f"Cls: "
+                    f"{loss_dict['cls'].item():.4f} | "
+                    f"DFL: "
+                    f"{loss_dict['dfl'].item():.4f} | "
+                    f"FG: "
+                    f"{loss_dict['num_foreground']}"
                 )
+
+        # ====================================================
+        # EPOCH AVERAGES
+        # ====================================================
+
+        denominator = max(
+            num_batches,
+            1
+        )
 
         epoch_loss = (
             running_loss /
-            max(num_batches, 1)
+            denominator
         )
 
-        return epoch_loss
+        epoch_box_loss = (
+            running_box_loss /
+            denominator
+        )
 
-    # ====================================================
+        epoch_cls_loss = (
+            running_cls_loss /
+            denominator
+        )
+
+        epoch_dfl_loss = (
+            running_dfl_loss /
+            denominator
+        )
+
+        return {
+
+            "loss":
+                epoch_loss,
+
+            "box":
+                epoch_box_loss,
+
+            "cls":
+                epoch_cls_loss,
+
+            "dfl":
+                epoch_dfl_loss
+        }
+
+    # ========================================================
     # VALIDATION
-    # ====================================================
+    # ========================================================
 
     @torch.no_grad()
     def validate(self):
 
         self.model.eval()
 
+        # ----------------------------------------------------
+        # Running losses
+        # ----------------------------------------------------
+
         running_loss = 0.0
+
+        running_box_loss = 0.0
+
+        running_cls_loss = 0.0
+
+        running_dfl_loss = 0.0
 
         num_batches = len(
             self.val_loader
         )
+
+        # ----------------------------------------------------
+        # Validation loop
+        # ----------------------------------------------------
 
         for images, targets in (
             self.val_loader
@@ -304,25 +408,80 @@ class Trainer:
                     images
                 )
 
-                loss = self.criterion(
+                loss_dict = self.criterion(
                     outputs,
                     targets
                 )
+
+                loss = loss_dict["total"]
+
+            # ------------------------------------------------
+            # Accumulate
+            # ------------------------------------------------
 
             running_loss += (
                 loss.item()
             )
 
-        val_loss = (
-            running_loss /
-            max(num_batches, 1)
+            running_box_loss += (
+                loss_dict["box"].item()
+            )
+
+            running_cls_loss += (
+                loss_dict["cls"].item()
+            )
+
+            running_dfl_loss += (
+                loss_dict["dfl"].item()
+            )
+
+        # ====================================================
+        # AVERAGE
+        # ====================================================
+
+        denominator = max(
+            num_batches,
+            1
         )
 
-        return val_loss
+        val_loss = (
+            running_loss /
+            denominator
+        )
 
-    # ====================================================
-    # FIT
-    # ====================================================
+        val_box_loss = (
+            running_box_loss /
+            denominator
+        )
+
+        val_cls_loss = (
+            running_cls_loss /
+            denominator
+        )
+
+        val_dfl_loss = (
+            running_dfl_loss /
+            denominator
+        )
+
+        return {
+
+            "loss":
+                val_loss,
+
+            "box":
+                val_box_loss,
+
+            "cls":
+                val_cls_loss,
+
+            "dfl":
+                val_dfl_loss
+        }
+
+    # ========================================================
+    # TRAINING LOOP
+    # ========================================================
 
     def fit(self):
 
@@ -331,6 +490,10 @@ class Trainer:
             ["epochs"]
         )
 
+        # ====================================================
+        # EPOCH LOOP
+        # ====================================================
+
         for epoch in range(
             1,
             epochs + 1
@@ -338,47 +501,46 @@ class Trainer:
 
             print(
                 "\n"
-                + "=" * 60
+                + "=" * 70
             )
 
             print(
-                f"Epoch "
-                f"{epoch}/{epochs}"
+                f"Epoch {epoch}/{epochs}"
             )
 
             print(
-                "=" * 60
+                "=" * 70
             )
 
-            # ------------------------------------------------
-            # Train
-            # ------------------------------------------------
+            # =================================================
+            # TRAIN
+            # =================================================
 
-            train_loss = (
+            train_metrics = (
                 self.train_one_epoch(
                     epoch
                 )
             )
 
-            # ------------------------------------------------
-            # Validation
-            # ------------------------------------------------
+            # =================================================
+            # VALIDATION
+            # =================================================
 
-            val_loss = (
+            val_metrics = (
                 self.validate()
             )
 
-            # ------------------------------------------------
-            # Scheduler
-            # ------------------------------------------------
+            # =================================================
+            # SCHEDULER
+            # =================================================
 
             if self.scheduler is not None:
 
                 self.scheduler.step()
 
-            # ------------------------------------------------
-            # Current LR
-            # ------------------------------------------------
+            # =================================================
+            # CURRENT LEARNING RATE
+            # =================================================
 
             current_lr = (
                 self.optimizer
@@ -386,53 +548,127 @@ class Trainer:
                 ["lr"]
             )
 
-            # ------------------------------------------------
-            # Metrics
-            # ------------------------------------------------
+            # =================================================
+            # COMBINE METRICS
+            # =================================================
 
             metrics = {
 
+                # ----------------------------
+                # Training
+                # ----------------------------
+
                 "train_loss":
-                    train_loss,
+                    train_metrics["loss"],
+
+                "train_box_loss":
+                    train_metrics["box"],
+
+                "train_cls_loss":
+                    train_metrics["cls"],
+
+                "train_dfl_loss":
+                    train_metrics["dfl"],
+
+                # ----------------------------
+                # Validation
+                # ----------------------------
 
                 "val_loss":
-                    val_loss,
+                    val_metrics["loss"],
+
+                "val_box_loss":
+                    val_metrics["box"],
+
+                "val_cls_loss":
+                    val_metrics["cls"],
+
+                "val_dfl_loss":
+                    val_metrics["dfl"],
+
+                # ----------------------------
+                # Learning rate
+                # ----------------------------
 
                 "learning_rate":
                     current_lr
             }
 
-            # ------------------------------------------------
-            # History
-            # ------------------------------------------------
+            # =================================================
+            # SAVE HISTORY
+            # =================================================
 
             self.history.update(
                 epoch,
                 metrics
             )
 
-            # ------------------------------------------------
-            # Print
-            # ------------------------------------------------
+            # =================================================
+            # PRINT EPOCH SUMMARY
+            # =================================================
 
             print(
-                f"\nTrain Loss: "
-                f"{train_loss:.4f}"
+                "\n"
+                "--------------- "
+                "Training "
+                "---------------"
             )
 
             print(
-                f"Val Loss: "
-                f"{val_loss:.4f}"
+                f"Train Total : "
+                f"{train_metrics['loss']:.4f}"
             )
 
             print(
-                f"LR: "
+                f"Train Box   : "
+                f"{train_metrics['box']:.4f}"
+            )
+
+            print(
+                f"Train Cls   : "
+                f"{train_metrics['cls']:.4f}"
+            )
+
+            print(
+                f"Train DFL   : "
+                f"{train_metrics['dfl']:.4f}"
+            )
+
+            print(
+                "\n"
+                "--------------- "
+                "Validation "
+                "---------------"
+            )
+
+            print(
+                f"Val Total   : "
+                f"{val_metrics['loss']:.4f}"
+            )
+
+            print(
+                f"Val Box     : "
+                f"{val_metrics['box']:.4f}"
+            )
+
+            print(
+                f"Val Cls     : "
+                f"{val_metrics['cls']:.4f}"
+            )
+
+            print(
+                f"Val DFL     : "
+                f"{val_metrics['dfl']:.4f}"
+            )
+
+            print(
+                f"\nLearning Rate: "
                 f"{current_lr:.8f}"
             )
 
-            # ------------------------------------------------
-            # Save last
-            # ------------------------------------------------
+            # =================================================
+            # SAVE LAST CHECKPOINT
+            # =================================================
 
             self.checkpoint_manager.save(
                 model=self.model,
@@ -443,13 +679,18 @@ class Trainer:
                 filename="last.pt"
             )
 
-            # ------------------------------------------------
-            # Save best
-            # ------------------------------------------------
+            # =================================================
+            # SAVE BEST CHECKPOINT
+            # =================================================
 
-            if val_loss < self.best_metric:
+            if (
+                val_metrics["loss"]
+                < self.best_metric
+            ):
 
-                self.best_metric = val_loss
+                self.best_metric = (
+                    val_metrics["loss"]
+                )
 
                 self.checkpoint_manager.save(
                     model=self.model,
@@ -460,13 +701,21 @@ class Trainer:
                     filename="best.pt"
                 )
 
-        # ----------------------------------------------------
-        # Save history
-        # ----------------------------------------------------
+                print(
+                    "\nBest model saved."
+                )
+
+        # ====================================================
+        # SAVE TRAINING HISTORY
+        # ====================================================
 
         self.history.save(
             Path(
                 self.checkpoint_manager
                 .save_dir
             ) / "history.json"
+        )
+
+        print(
+            "\nTraining completed."
         )
