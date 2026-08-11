@@ -1,0 +1,38 @@
+{
+    "dataset_root": "d:\\IZI\\FODPascalVOCFormat-V.2.1\\FODPascalVOCFormat-V.2.1\\VOC2007",
+    "random_seed": 42,
+    "validation_size": 0.2,
+    "original": {
+        "trainval_entries": 25345,
+        "trainval_unique": 25298,
+        "test_entries": 8448,
+        "test_unique": 8429
+    },
+    "duplicates": {
+        "trainval_removed": 47,
+        "test_removed": 19
+    },
+    "train_test_overlap": {
+        "count": 4,
+        "ids": [
+            "014567",
+            "015731",
+            "016653",
+            "016763"
+        ]
+    },
+    "validation": {
+        "invalid_trainval": 0,
+        "invalid_test": 0
+    },
+    "final_split": {
+        "train": 20235,
+        "validation": 5059,
+        "test": 8429
+    },
+    "final_overlap": {
+        "train_val": 0,
+        "train_test": 0,
+        "val_test": 0
+    }
+}
